@@ -442,10 +442,10 @@ def _insert_trace_result(conn: sqlite3.Connection, path_id: int, snr_values: str
 # --- Thread 3: Visualisierung (Dash + Cytoscape) --------------------------
 
 
-def create_dash_app_from_db(db_path):
+def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
     import dash
     from dash import html, dcc, Output, Input, State
-    import dash_cytoscape as cyto
+    import dash_leaflet as dl
     import sqlite3
 
     conn = sqlite3.connect(db_path)
@@ -490,53 +490,66 @@ def create_dash_app_from_db(db_path):
     else:
         min_lon = max_lon = min_lat = max_lat = width = height = 1
 
-    def map_coords(lon, lat):
-        px = int(100 + 800 * (lon - min_lon) / width)
-        py = int(100 + 600 * (max_lat - lat) / height)
-        return {"x": px, "y": py}
+    IMG_W, IMG_H = 1000, 800
+
+    def map_coords_to_latlon(lon, lat):
+        return [lat, lon]
 
     cy_nodes = []
+    node_markers = []
     for n, meta in node_meta.items():
         data = {"id": n, "label": node_label(n)}
         data.update(meta)
         node_dict = {"data": data}
         if val_ok(meta["longitude"]) and val_ok(meta["latitude"]):
-            node_dict["position"] = map_coords(meta["longitude"], meta["latitude"])
+            # Position für Cytoscape nicht mehr notwendig, aber wir behalten die Daten
             cy_nodes.append(node_dict)
+            node_markers.append(
+                dl.Marker(
+                    position=map_coords_to_latlon(meta["longitude"], meta["latitude"]),
+                    children=dl.Tooltip(node_label(n)),
+                )
+            )
 
-    cy_elements = cy_nodes  # vorerst keine Edges
+    # Leaflet-Kartenmitte bestimmen
+    if coords:
+        center_lat = (min_lat + max_lat) / 2
+        center_lon = (min_lon + max_lon) / 2
+        zoom = 13
+    else:
+        center_lat = 49.2125578
+        center_lon = 16.62662018
+        zoom = 14
 
     app = dash.Dash(__name__)
     app.layout = html.Div(
         [
-            html.H2("MeshCore Reachability (Nodes)"),
-            cyto.Cytoscape(
-                id="cytoscape-reachability",
-                elements=cy_elements,
-                layout={
-                    "name": "preset",
-                    "nodeDimensionsIncludeLabels": False,
-                    "randomize": False,
-                },
-                style={"width": "100%", "height": "800px"},
-                stylesheet=[
-                    {
-                        "selector": "node",
-                        "style": {
-                            "width": "10px",
-                            "height": "10px",
-                            # "label": "data(label)",
-                            "font-size": "12px",
-                            "background-color": "blue",
-                        },
-                    },
-                    {
-                        "selector": "node[id = 'ME']",
-                        "style": {"background-color": "red"},
-                    },
-                ],
-            ),
-            html.Div(
+            html.H2("MeshCore Reachability"),
+            dl.Map(
+                center=[center_lat, center_lon],
+                zoom=zoom,
+                style={"width": "100%", "height": "800px", "position": "relative"},
+                children=[
+                    dl.TileLayer(
+                        url=(
+                            f"https://api.maptiler.com/maps/topo-v4/{{z}}/{{x}}/{{y}}.png?key={maptiler_api_key}"
+                            if maptiler_api_key
+                            else "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                        ),
+                        attribution=(
+                            "<a href='https://www.maptiler.com/copyright/' target='_blank'>&copy; MapTiler</a> "
+                            "<a href='https://www.openstreetmap.org/copyright' target='_blank'>&copy; OpenStreetMap contributors</a>"
+                            if maptiler_api_key
+                            else "&copy; OpenStreetMap contributors"
+                        ),
+                        tileSize=512 if maptiler_api_key else 256,
+                        zoomOffset=-1 if maptiler_api_key else 0,
+                    ),
+                    dl.LayerGroup(node_markers),
+                    ],
+                    ),
+                    html.Div(
+
                 id="node-details-overlay",
                 style={
                     "margin": "16px",
@@ -551,36 +564,13 @@ def create_dash_app_from_db(db_path):
         ]
     )
 
-    @app.callback(
-        Output("node-details-overlay", "children"),
-        Output("node-details-overlay", "style"),
-        Input("cytoscape-reachability", "tapNodeData"),
-        State("node-meta-store", "data"),
-    )
-    def display_node_metadata(data, meta):
-        if not data:
-            return "", {"display": "none"}
-        node_id = data["id"]
-        if node_id in meta:
-            d = meta[node_id]
-            detail = "\n".join(f"{k}: {d[k]}" for k in d)
-        else:
-            detail = f"ID: {node_id}"
-        return detail, {
-            "display": "block",
-            "background": "#fafafa",
-            "border": "1px solid #ccc",
-            "margin": "16px",
-            "padding": "8px",
-            "white-space": "pre",
-        }
 
     return app
 
 
-def dash_server_thread(db_path: str, stop_event: threading.Event):
+def dash_server_thread(db_path: str, stop_event: threading.Event, maptiler_api_key: str | None = None):
     """Startet die Dash-Anwendung (blockierend in diesem Thread)."""
-    app = create_dash_app_from_db(db_path)
+    app = create_dash_app_from_db(db_path, maptiler_api_key=maptiler_api_key)
     # Dash selbst hat keine eingebaute Möglichkeit, über ein Event sauber zu stoppen.
     # Wir starten den Server einfach und verlassen uns auf Prozessende.
     print("[dash] Starting Dash server on http://0.0.0.0:5342 ...")
@@ -598,9 +588,11 @@ async def main():
     parser = argparse.ArgumentParser(description="MeshCore Reachability Graph")
     parser.add_argument("-p", "--port", required=True, help="LoRa-Device serial port")
     parser.add_argument("--db", default="mcreach.sqlite", help="SQLite database file")
+    parser.add_argument("-ak", "--maptiler_api_key", dest="maptiler_api_key", help="Optional MapTiler API key for background map", required=False)
     args = parser.parse_args()
 
     db_path = args.db
+    maptiler_api_key = args.maptiler_api_key
     stop_event = threading.Event()
 
     # Kombinierter Thread: Adverts einsammeln, Pfade auswerten und Traces sequenziell ausführen
@@ -615,7 +607,7 @@ async def main():
     print("[main] Collector thread started. Launching Dash app in main process (Ctrl+C to stop)...")
 
     try:
-        dash_server_thread(db_path, stop_event)
+        dash_server_thread(db_path, stop_event, maptiler_api_key)
     except KeyboardInterrupt:
         print("[main] Stopping ...")
         stop_event.set()
