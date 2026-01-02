@@ -147,9 +147,10 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
     async def _run():
         mc: MeshCore | None = None
         subscription = None
+        last_advert_hour = datetime.now().hour  # track last full hour when advert was sent
 
         async def handle_rf_packet(event):
-            nonlocal mc, subscription
+            nonlocal mc, subscription, last_advert_hour
 
             packet = event.payload
             if isinstance(packet, dict) and "payload" in packet:
@@ -160,10 +161,10 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
                 # print(f"  Message Path: {packet.path}")
 
                 if packet.payload_type == PayloadType.Advert and packet.payload.get("decoded"):
-                    
-                    # detach from further events to focus on path tracing            
+
+                    # detach from further events to focus on path tracing
                     mc.unsubscribe(subscription)
-                    
+
                     advert = packet.payload["decoded"]
                     name = advert.app_data.get("name")
                     roleval = advert.app_data.get("device_role")
@@ -178,10 +179,15 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
                         longitude = location.get("longitude")
                         # print(f"  Location: {latitude}, {longitude}")
                     write_node_to_db(conn, advert.public_key, name, role, latitude, longitude, formatPath(packet.path))
-                    #full_path = [advert.public_key]
-                    #if packet.path:
-                    #    full_path += packet.path
-                    # if role == "Chat Node":
+
+                    # send out advert once per full hour so peering chat nodes can respond
+                    current_hour = datetime.now().hour
+                    if last_advert_hour is None or current_hour != last_advert_hour:
+                        last_advert_hour = current_hour
+                        await mc.commands.send_advert(True)
+                        await asyncio.sleep(3)
+
+                    # process the foreign advert
                     await process_advert(role, advert.public_key, packet.path)
                     # now listen to RX log events again
                     subscription = mc.subscribe(EventType.RX_LOG_DATA, handle_rf_packet)
@@ -214,7 +220,7 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
                         # the prefix path could not be reached last time, so stop the whole process
                         return
 
-                    if needsNewTrace:                        
+                    if needsNewTrace:
                         if len(prefix_short) == 1:
                             full_path = list(prefix_short)
                         else:
