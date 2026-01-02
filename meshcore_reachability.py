@@ -463,39 +463,46 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
     import dash_leaflet as dl
     import sqlite3
 
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
+    def load_node_meta_from_db():
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        c = conn.cursor()
+        c.execute(
+            """SELECT
+                n.public_key,
+                n.name,
+                n.role,
+                n.latitude,
+                n.longitude,
+                n.lastpath,
+                n.lastmod,
+                EXISTS(
+                    SELECT 1
+                    FROM paths AS p
+                    JOIN traces AS t ON t.path_id = p.id
+                    WHERE p.target_node = n.public_key
+                    AND t.snr_values IS NOT NULL
+                ) AS reachable
+            FROM nodes AS n"""
+        )
+        rows = c.fetchall()
+        conn.close()
 
-    c.execute("""SELECT 
-        n.public_key, 
-        n.name, 
-        n.role, 
-        n.latitude, 
-        n.longitude, 
-        n.lastpath, 
-        n.lastmod, 
-        EXISTS(
-            SELECT 1 
-            FROM paths AS p
-            JOIN traces AS t ON t.path_id = p.id
-            WHERE p.target_node = n.public_key
-            AND t.snr_values IS NOT NULL
-        ) AS reachable
-        FROM nodes AS n""")
-    rows = c.fetchall()
+        node_meta_local = {}
+        for row in rows:
+            node_meta_local[row[0]] = {
+                "public_key": row[0],
+                "name": row[1],
+                "role": row[2],
+                "latitude": row[3],
+                "longitude": row[4],
+                "lastpath": row[5],
+                "lastmod": row[6],
+                "reachable": row[7],
+            }
+        return node_meta_local
 
-    node_meta = {}
-    for row in rows:
-        node_meta[row[0]] = {
-            "public_key": row[0],
-            "name": row[1],
-            "role": row[2],
-            "latitude": row[3],
-            "longitude": row[4],
-            "lastpath": row[5],
-            "lastmod": row[6],
-            "reachable": row[7],
-        }
+    node_meta = load_node_meta_from_db()
+
 
     def node_label(n):
         return n[:4] if len(n) == 64 else n
@@ -580,8 +587,25 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
                 },
             ),
             dcc.Store(id="node-meta-store", data=node_meta),
-        ]
+            dcc.Interval(
+                id="db-refresh-interval",
+                interval=2 * 60 * 1000,  # 2 Minuten
+                n_intervals=0,
+            ),
+            ]
+            )
+
+    @app.callback(
+        Output("node-meta-store", "data"),
+        Input("db-refresh-interval", "n_intervals"),
+        State("node-meta-store", "data"),
     )
+    def refresh_node_meta(n_intervals, current_data):
+        # z.B. nur alle 1 Intervalle wirklich laden (alle 2 Minuten)
+        if n_intervals is None:
+            return current_data
+        # Hier könnte man zusätzlich throttlen (n_intervals % N), falls gewünscht
+        return load_node_meta_from_db()
 
     @app.callback(
         Output("node-layer", "children"),
@@ -627,7 +651,7 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
                         id=f"node-marker-{meta["public_key"]}",
                         position=map_coords_to_latlon(meta["longitude"], meta["latitude"]),
                         children=dl.Tooltip(
-                            content=f"<b>{meta['role']} {meta['name']}</b><br/>Latest Path: {meta["lastpath"] or "[direct]"}<br/>Public-Key: {meta["public_key"][:10]}...<br/><img src='{mclink_qr_data_url}' alt='MC-Link QR Code'/>"
+                            content=f"<span style='font-weight:bold;color:{"blue" if meta["reachable"]==1 else "red"}'>{meta['role']} {meta['name']}</span><br/>Latest Path: {meta["lastpath"] or "[direct]"}<br/>Public-Key: {meta["public_key"][:10]}...<br/><img src='{mclink_qr_data_url}' alt='MC-Link QR Code'/>"
                         ),
                         icon={
                             "iconUrl": dash.get_asset_url(f"{meta["role"].lower().replace(' ', '-')}{"_reachable" if meta["reachable"]==1 else ""}.svg"),
