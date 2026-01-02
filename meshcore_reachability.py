@@ -460,10 +460,23 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
-    # Minimal: nur Nodes visualisieren; Kanten/Reachability folgt später
-    c.execute("SELECT public_key, name, role, latitude, longitude, lastpath, lastmod FROM nodes")
+    c.execute("""SELECT 
+        n.public_key, 
+        n.name, 
+        n.role, 
+        n.latitude, 
+        n.longitude, 
+        n.lastpath, 
+        n.lastmod, 
+        EXISTS(
+            SELECT 1 
+            FROM paths AS p
+            JOIN traces AS t ON t.path_id = p.id
+            WHERE p.target_node = n.public_key
+            AND t.snr_values IS NOT NULL
+        ) AS reachable
+        FROM nodes AS n""")
     rows = c.fetchall()
-    conn.close()
 
     node_meta = {}
     for row in rows:
@@ -475,6 +488,7 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
             "longitude": row[4],
             "lastpath": row[5],
             "lastmod": row[6],
+            "reachable": row[7],
         }
 
     def node_label(n):
@@ -504,19 +518,19 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
     def map_coords_to_latlon(lon, lat):
         return [lat, lon]
 
-    cy_nodes = []
+    # cy_nodes = []
     node_markers = []
     for n, meta in node_meta.items():
-        data = {"id": n, "label": node_label(n)}
-        data.update(meta)
-        node_dict = {"data": data}
+        # data = {"id": n, "label": node_label(n)}
+        # data.update(meta)
+        # node_dict = {"data": data}
         if val_ok(meta["longitude"]) and val_ok(meta["latitude"]):
-            # Position für Cytoscape nicht mehr notwendig, aber wir behalten die Daten
-            cy_nodes.append(node_dict)
+            # cy_nodes.append(node_dict)
             node_markers.append(
                 dl.Marker(
+                    id=f"node-marker-{meta["public_key"]}",
                     position=map_coords_to_latlon(meta["longitude"], meta["latitude"]),
-                    children=dl.Tooltip(node_label(n)),
+                    children=dl.Tooltip(content=f"{meta["role"]} {meta["name"]}<br/>Latest Path: {meta["lastpath"] or "<direkt>"}"),
                 )
             )
 
@@ -524,16 +538,22 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
     if coords:
         center_lat = (min_lat + max_lat) / 2
         center_lon = (min_lon + max_lon) / 2
-        zoom = 13
+        zoom = 8
     else:
         center_lat = 49.2125578
         center_lon = 16.62662018
-        zoom = 14
+        zoom = 8
 
     app = dash.Dash(__name__)
     app.layout = html.Div(
         [
             html.H2("MeshCore Reachability"),
+            dcc.Checklist(
+                id="reachable-filter",
+                options=[{"label": "reachable nodes: bidirectional, checked latest path from adverts", "value": "reachable_only"}],
+                value=[],
+                style={"margin": "8px 0"},
+            ),
             dl.Map(
                 center=[center_lat, center_lon],
                 zoom=zoom,
@@ -554,11 +574,10 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
                         tileSize=512 if maptiler_api_key else 256,
                         zoomOffset=-1 if maptiler_api_key else 0,
                     ),
-                    dl.LayerGroup(node_markers),
-                    ],
-                    ),
-                    html.Div(
-
+                    dl.LayerGroup(id="node-layer"),
+                ],
+            ),
+            html.Div(
                 id="node-details-overlay",
                 style={
                     "margin": "16px",
@@ -572,6 +591,33 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
             dcc.Store(id="node-meta-store", data=node_meta),
         ]
     )
+
+    @app.callback(
+        Output("node-layer", "children"),
+        Input("reachable-filter", "value"),
+        State("node-meta-store", "data"),
+    )
+    def update_node_markers(filter_values, node_meta_store):
+        show_reachable_only = "reachable_only" in (filter_values or [])
+
+        def val_ok(val):
+            return val not in (None, 0, 0.0)
+
+        markers = []
+        for meta in node_meta_store.values():
+            if show_reachable_only and meta.get("reachable", 0) == 0:
+                continue
+            if val_ok(meta.get("longitude")) and val_ok(meta.get("latitude")):
+                markers.append(
+                    dl.Marker(
+                        id=f"node-marker-{meta["public_key"]}",
+                        position=map_coords_to_latlon(meta["longitude"], meta["latitude"]),
+                        children=dl.Tooltip(
+                            content=f"{meta['role']} {meta['name']}<br/>Latest Path: {meta['lastpath'] or '<direkt>'}"
+                        ),
+                    )
+                )
+        return markers
 
 
     return app
