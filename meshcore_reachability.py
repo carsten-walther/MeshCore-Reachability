@@ -603,7 +603,6 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
         zoom = 8
 
     app = dash.Dash(__name__)
-    # app.index_string = """<!DOCTYPE html>\n<html>\n    <head>\n        {%metas%}\n        <title>{%title%}</title>\n        {%favicon%}\n        {%css%}\n        <style>html, body { margin: 0; padding: 0; }</style>\n    </head>\n    <body>\n        {%app_entry%}\n        <footer>\n            {%config%}\n            {%scripts%}\n            {%renderer%}\n        </footer>\n    </body>\n</html>\n"""
     app.layout = html.Div(
         className="app-root",
         children=[
@@ -861,9 +860,23 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
                             style=cell_style,
                         ),
                         html.Td(
-                            html.Img(
-                                src=mclink_qr_data_url,
-                                style={"height": "64px", "width": "64px"},
+                            html.Div(
+                                className="qr-button-with-tooltip",
+                                children=[
+                                    html.Img(
+                                        src=dash.get_asset_url("qrcode.svg"),
+                                        className="qr-icon",
+                                    ),
+                                    html.Div(
+                                        className="qr-tooltip",
+                                        children=[
+                                            html.Img(
+                                                src=mclink_qr_data_url,
+                                                className="qr-tooltip-image",
+                                            )
+                                        ],
+                                    ),
+                                ],
                             ),
                             style=cell_style,
                         ),

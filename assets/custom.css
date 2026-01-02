@@ -160,3 +160,41 @@ html, body {
     font-family: monospace;
     font-size: 12px;
 }
+
+.qr-button-with-tooltip {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.qr-icon {
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+    filter: invert(73%) sepia(81%) saturate(662%) hue-rotate(7deg) brightness(101%) contrast(101%);
+}
+
+.qr-button-with-tooltip .qr-tooltip {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    z-index: 10;
+    top: 100%;
+    left: 0;
+    background-color: #222;
+    border: 1px solid #555;
+    padding: 4px;
+    border-radius: 4px;
+    transition: opacity 0.15s ease;
+}
+
+.qr-button-with-tooltip:hover .qr-tooltip {
+    visibility: visible;
+    opacity: 1;
+}
+
+.qr-tooltip-image {
+    width: 128px;
+    height: 128px;
+}
