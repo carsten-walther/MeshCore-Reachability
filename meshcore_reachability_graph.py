@@ -78,6 +78,8 @@ def init_db(db_path: str):
     return conn
 
 def formatPath(path_elems: list):
+    if not path_elems:
+        return ""
     return ",".join(path_elems)
 
 def write_node_to_db(conn: sqlite3.Connection, public_key, name, role, latitude, longitude, lastpath):
@@ -157,8 +159,11 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
                         longitude = location.get("longitude")
                         # print(f"  Location: {latitude}, {longitude}")
                     write_node_to_db(conn, advert.public_key, name, role, latitude, longitude, formatPath(packet.path))
-                    packet.path.insert(0, advert.public_key[:2])
-                    await process_path(packet.path)
+                    full_path = [advert.public_key]
+                    if packet.path:
+                        full_path += packet.path
+                        
+                    await process_path(full_path)
                     # now listen to RX log events again
                     subscription = mc.subscribe(EventType.RX_LOG_DATA, handle_rf_packet)
                 else:
@@ -171,16 +176,18 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
                 path_elems = list(reversed(path))
 
                 prefix = []
+                prefix_short = []
                 for elem in path_elems:
                     prefix.append(elem)
+                    prefix_short.append(elem[:2])
                     path_id, now_ts = _ensure_path_record(conn, prefix)
 
                     if _needs_new_trace(conn, path_id, now_ts):
                         
-                        if len(prefix) == 1:
-                            full_path = list(prefix)
+                        if len(prefix_short) == 1:
+                            full_path = list(prefix_short)
                         else:
-                            full_path = list(prefix) + list(reversed(prefix[:-1]))
+                            full_path = list(prefix_short) + list(reversed(prefix_short[:-1]))
 
                         full_path_flat = formatPath(full_path)
                         snr_values = await _execute_trace_for_path_async(mc, full_path_flat)
