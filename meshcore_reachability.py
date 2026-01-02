@@ -244,6 +244,7 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
                     await mc.commands.get_contacts()
                     contact = mc.get_contact_by_key_prefix(public_key)
                     if contact is None:
+                        print("Your contact list seems to be filled totally; you need to remove unrequired records to process new Chat Node adverts")
                         return
 
                 saved_out_path = contact["out_path"]
@@ -326,28 +327,6 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
 
 
 # --- Thread 2: Auswertung nach 'nodes' geschriebenen Pfaden ----------------
-
-
-def _parse_lastpath(raw):
-    """Parst nodes.lastpath.
-
-    - None/"" -> None
-    - String mit JSON-Array z.B. "['c0','92']" -> Liste ['c0', '92']
-    """
-    if raw is None:
-        return None
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        # Erwartet ein Array-ähnliches Format
-        value = eval(raw, {"__builtins__": {}}, {})
-        if isinstance(value, (list, tuple)):
-            return [str(x).strip() for x in value if str(x).strip()]
-    except Exception:
-        return None
-    return None
-
 
 def _ensure_path_record(conn: sqlite3.Connection, path_elements):
     """Sucht oder legt einen Pfad in 'paths' an und erhöht count.
