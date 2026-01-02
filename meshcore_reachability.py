@@ -502,7 +502,7 @@ def create_dash_app_from_db(db_path):
         node_dict = {"data": data}
         if val_ok(meta["longitude"]) and val_ok(meta["latitude"]):
             node_dict["position"] = map_coords(meta["longitude"], meta["latitude"])
-        cy_nodes.append(node_dict)
+            cy_nodes.append(node_dict)
 
     cy_elements = cy_nodes  # vorerst keine Edges
 
@@ -515,7 +515,7 @@ def create_dash_app_from_db(db_path):
                 elements=cy_elements,
                 layout={
                     "name": "preset",
-                    "nodeDimensionsIncludeLabels": True,
+                    "nodeDimensionsIncludeLabels": False,
                     "randomize": False,
                 },
                 style={"width": "100%", "height": "800px"},
@@ -523,7 +523,9 @@ def create_dash_app_from_db(db_path):
                     {
                         "selector": "node",
                         "style": {
-                            "label": "data(label)",
+                            "width": "10px",
+                            "height": "10px",
+                            # "label": "data(label)",
                             "font-size": "12px",
                             "background-color": "blue",
                         },
@@ -542,6 +544,7 @@ def create_dash_app_from_db(db_path):
                     "border": "1px solid #ccc",
                     "display": "none",
                     "background": "#fafafa",
+                    "white-space": "pre",
                 },
             ),
             dcc.Store(id="node-meta-store", data=node_meta),
@@ -569,6 +572,7 @@ def create_dash_app_from_db(db_path):
             "border": "1px solid #ccc",
             "margin": "16px",
             "padding": "8px",
+            "white-space": "pre",
         }
 
     return app
@@ -580,7 +584,7 @@ def dash_server_thread(db_path: str, stop_event: threading.Event):
     # Dash selbst hat keine eingebaute Möglichkeit, über ein Event sauber zu stoppen.
     # Wir starten den Server einfach und verlassen uns auf Prozessende.
     print("[dash] Starting Dash server on http://0.0.0.0:5342 ...")
-    app.run(host="0.0.0.0", port=5342, debug=True)
+    app.run(host="0.0.0.0", port=5342, debug=False)
 
 
 # --- main() -------
@@ -606,28 +610,17 @@ async def main():
         daemon=True,
     )
 
-    # Thread 3: Dash-Visualisierung
-    t_dash = threading.Thread(
-        target=dash_server_thread,
-        args=(db_path, stop_event),
-        daemon=True,
-    )
-
     t_collect_paths.start()
-    # t_dash.start()
 
-    print("[main] Threads started (collector+paths, dash). Press Ctrl+C to stop.")
+    print("[main] Collector thread started. Launching Dash app in main process (Ctrl+C to stop)...")
 
     try:
-        while True:
-            await asyncio.sleep(1)
+        dash_server_thread(db_path, stop_event)
     except KeyboardInterrupt:
         print("[main] Stopping ...")
         stop_event.set()
-        # kurze Wartezeit für sauberes Beenden der Nicht-Dash-Threads
+        # kurze Wartezeit für sauberes Beenden des Collector-Threads
         await asyncio.sleep(2)
-        
-    # await mc.disconnect()
 
 
 if __name__ == "__main__":
