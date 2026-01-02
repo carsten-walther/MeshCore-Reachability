@@ -204,8 +204,12 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
                     prefix_short.append(elem[:2])
                     path_id, now_ts = _ensure_path_record(conn, prefix)
 
-                    if _needs_new_trace(conn, path_id, now_ts):
-                        
+                    needsNewTrace, lastTraceFailed = _needs_new_trace(conn, path_id, now_ts)
+                    if not needsNewTrace and lastTraceFailed:
+                        # the prefix path could not be reached last time, so stop the whole process
+                        return
+
+                    if needsNewTrace:                        
                         if len(prefix_short) == 1:
                             full_path = list(prefix_short)
                         else:
@@ -234,7 +238,10 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
 
                 # check if path was checked already
                 path_id, now_ts = _ensure_path_record(conn, full_path)
-                if not _needs_new_trace(conn, path_id, now_ts):
+
+                needsNewTrace, lastTraceFailed = _needs_new_trace(conn, path_id, now_ts)
+
+                if not needsNewTrace:
                     return
 
                 # try to contact Chat Node
@@ -355,25 +362,27 @@ def _ensure_path_record(conn: sqlite3.Connection, path_elements):
     conn.commit()
     return pid, now_ts
 
-
-def _needs_new_trace(conn: sqlite3.Connection, path_id: int, now_ts: str) -> bool:
+def _needs_new_trace(conn: sqlite3.Connection, path_id: int, now_ts: str) -> tuple[bool,bool]:
     """Prüft, ob für path_id ein neuer Trace ausgeführt werden soll.
 
+    1. Return Value:
     - Wenn kein Trace-Eintrag existiert -> True
     - Wenn letzter Trace älter als 24 Stunden -> True
+    2. Return Value:
+    - Falls der letzte Trace fehlgeschlagen ist --> True
     """
     c = conn.cursor()
     c.execute(
-        "SELECT timestamp FROM traces WHERE path_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT timestamp, snr_values FROM traces WHERE path_id = ? ORDER BY id DESC LIMIT 1",
         (path_id,),
     )
     row = c.fetchone()
     if not row:
-        return True
+        return True,False
     last_ts = datetime.fromisoformat(row[0])
     now_dt = datetime.fromisoformat(now_ts)
     delta = now_dt - last_ts
-    return delta.total_seconds() > 3600*24  # > 24 Stunden
+    return delta.total_seconds() > 3600*24, row[1] is None # > 24 Stunden
 
 
 async def _execute_trace_for_path_async(mc: MeshCore, full_path):
