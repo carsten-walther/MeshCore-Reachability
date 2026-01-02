@@ -694,18 +694,7 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
                                     ]
                                 )
                             ),
-                            html.Tbody(
-                                children=[
-                                    html.Tr(
-                                        children=[
-                                            html.Td("", style={"padding": "4px", "border-bottom": "1px solid #eee"}),
-                                            html.Td("", style={"padding": "4px", "border-bottom": "1px solid #eee"}),
-                                            html.Td("", style={"padding": "4px", "border-bottom": "1px solid #eee"}),
-                                            html.Td("", style={"padding": "4px", "border-bottom": "1px solid #eee"}),
-                                        ]
-                                    )
-                                ]
-                            ),
+                            html.Tbody(id="nodes-without-geo-body"),
                         ],
                     ),
                 ],
@@ -751,14 +740,41 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
         Output("stat-roomservers-rcvd", "children"),
         Output("stat-roomservers-reach", "children"),
         Output("stat-checked-paths", "children"),
+        Output("nodes-without-geo-body", "children"),
         Input("reachable-filter", "value"),
         State("node-meta-store", "data"),
-    )
+        )
     def update_node_markers(filter_values, node_meta_store):
         show_reachable_only = "reachable_only" in (filter_values or [])
 
         def val_ok(val):
             return val not in (None, 0, 0.0)
+
+        def get_role_id(meta):
+            role_id = 1
+            if meta.get("role") == "Repeater":
+                role_id = 2
+            elif meta.get("role") == "Room Server":
+                role_id = 3
+            return role_id
+
+        def get_mclink_qr(meta):
+            role_id = get_role_id(meta)
+            mclink = f"meshcore://contact/add?{urlencode({'name': meta.get('name')})}&public_key={meta['public_key']}&type={role_id}"
+
+            if mclink in mclink_qr_cache:
+                return mclink_qr_cache[mclink]
+
+            qr = qrcode.QRCode(box_size=4, border=2)
+            qr.add_data(mclink)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            mclink_qr_data_url = f"data:image/png;base64,{img_b64}"
+            mclink_qr_cache[mclink] = mclink_qr_data_url
+            return mclink_qr_data_url
 
         # read nodes for markers
         markers = []
@@ -766,44 +782,80 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
             if show_reachable_only and meta.get("reachable", 0) == 0:
                 continue
             if val_ok(meta.get("longitude")) and val_ok(meta.get("latitude")):
-                
-                role_id=1
-                if meta.get("role")=="Repeater":
-                    role_id=2
-                elif meta.get("role")=="Room Server":
-                    role_id=3
 
-                mclink = f"meshcore://contact/add?{urlencode({"name": meta.get("name")})}&public_key={meta["public_key"]}&type={role_id}"
-
-                # QR-Code für mclink erzeugen (lokal, ohne externen Dienst) – mit Caching
-                if mclink in mclink_qr_cache:
-                    mclink_qr_data_url = mclink_qr_cache[mclink]
-                else:
-                    qr = qrcode.QRCode(box_size=4, border=2)
-                    qr.add_data(mclink)
-                    qr.make(fit=True)
-                    img = qr.make_image(fill_color="black", back_color="white")
-                    buf = io.BytesIO()
-                    img.save(buf, format="PNG")
-                    img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-                    mclink_qr_data_url = f"data:image/png;base64,{img_b64}"
-                    mclink_qr_cache[mclink] = mclink_qr_data_url
+                mclink_qr_data_url = get_mclink_qr(meta)
 
                 markers.append(
                     dl.Marker(
-                        id=f"node-marker-{meta["public_key"]}",
+                        id=f"node-marker-{meta['public_key']}",
                         position=map_coords_to_latlon(meta["longitude"], meta["latitude"]),
                         children=dl.Tooltip(
-                            content=f"<span style='font-weight:bold;color:{"blue" if meta["reachable"]==1 else "red"}'>{meta['role']} {meta['name']}</span><br/>Latest Path: {meta["lastpath"] or "[direct]"}<br/>Public-Key: {meta["public_key"][:10]}...<br/><img src='{mclink_qr_data_url}' alt='MC-Link QR Code'/>"
+                            content=f"<span style='font-weight:bold;color:{'blue' if meta['reachable']==1 else 'red'}'>{meta['role']} {meta['name']}</span><br/>Latest Path: {meta['lastpath'] or '[direct]'}<br/>Public-Key: {meta['public_key'][:10]}...<br/><img src='{mclink_qr_data_url}' alt='MC-Link QR Code'/>"
                         ),
                         icon={
-                            "iconUrl": dash.get_asset_url(f"{meta["role"].lower().replace(' ', '-')}{"_reachable" if meta["reachable"]==1 else ""}.svg"),
+                            "iconUrl": dash.get_asset_url(f"{meta['role'].lower().replace(' ', '-')}{'_reachable' if meta['reachable']==1 else ''}.svg"),
                             "iconSize": "24",
                             "shadowUrl": dash.get_asset_url("iconbg.svg"),
-                            "shadowSize": "28"
-                        }
+                            "shadowSize": "28",
+                        },
                     )
                 )
+
+        # Tabelle "Nodes without geo location" füllen
+        nodes_no_geo = [
+            meta
+            for meta in node_meta_store.values()
+            if not val_ok(meta.get("longitude")) or not val_ok(meta.get("latitude"))
+        ]
+
+        def sort_key(m):
+            # erreichbare zuerst, dann nicht erreichbare
+            reachable_flag = 0 if m.get("reachable") == 1 else 1
+            # lastmod absteigend -> wir geben negativen Timestamp als Sortierschlüssel zurück
+            try:
+                dt = datetime.fromisoformat(m.get("lastmod") or "1970-01-01 00:00:00")
+                ts = dt.timestamp()
+            except Exception:
+                ts = 0
+            return (reachable_flag, -ts)
+
+        nodes_no_geo_sorted = sorted(nodes_no_geo, key=sort_key)
+
+        rows_no_geo = []
+        for meta in nodes_no_geo_sorted:
+            mclink_qr_data_url = get_mclink_qr(meta)
+
+            name_style = {"padding": "4px", "border-bottom": "1px solid #eee"}
+            if meta.get("reachable") == 1:
+                name_style = {
+                    "padding": "4px",
+                    "border-bottom": "1px solid #eee",
+                    "color": "blue",
+                }
+
+            rows_no_geo.append(
+                html.Tr(
+                    children=[
+                        html.Td(meta.get("name") or "", style=name_style),
+                        html.Td(
+                            meta.get("role") or "",
+                            style={"padding": "4px", "border-bottom": "1px solid #eee"},
+                        ),
+                        html.Td(
+                            meta.get("public_key") or "",
+                            style={"padding": "4px", "border-bottom": "1px solid #eee"},
+                        ),
+                        html.Td(
+                            html.Img(
+                                src=mclink_qr_data_url,
+                                style={"height": "64px", "width": "64px"},
+                            ),
+                            style={"padding": "4px", "border-bottom": "1px solid #eee"},
+                        ),
+                    ]
+                )
+            )
+
         return (
             markers,
             statistics["chatnodes_rcvd_adverts"],
@@ -813,6 +865,7 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
             statistics["roomservers_rcvd_adverts"],
             statistics["roomservers_reachable"],
             f"Checked {statistics['checked_paths']} paths including sub-paths.",
+            rows_no_geo,
         )
 
 
