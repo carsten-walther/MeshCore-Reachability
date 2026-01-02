@@ -176,17 +176,56 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
                     #full_path = [advert.public_key]
                     #if packet.path:
                     #    full_path += packet.path
-                    if role == "Chat Node":
-                        await process_advert(advert.public_key, packet.path)
+                    # if role == "Chat Node":
+                    await process_advert(role, advert.public_key, packet.path)
                     # now listen to RX log events again
                     subscription = mc.subscribe(EventType.RX_LOG_DATA, handle_rf_packet)
                 else:
                     print(".", end='')
                     
-        async def process_advert(public_key, path):
+        async def process_advert(role, public_key, path):
             nonlocal mc
 
             try:
+                
+                # examine the path
+                
+                path_elems = []
+                if path:
+                    path_elems = list(reversed(path))
+                    
+                if role != "Chat Node":
+                    path_elems += [public_key]
+
+                prefix = []
+                prefix_short = []
+                for elem in path_elems:
+                    prefix.append(elem)
+                    prefix_short.append(elem[:2])
+                    path_id, now_ts = _ensure_path_record(conn, prefix)
+
+                    if _needs_new_trace(conn, path_id, now_ts):
+                        
+                        if len(prefix_short) == 1:
+                            full_path = list(prefix_short)
+                        else:
+                            full_path = list(prefix_short) + list(reversed(prefix_short[:-1]))
+
+                        full_path_flat = formatPath(full_path)
+                        snr_values = await _execute_trace_for_path_async(mc, full_path_flat)
+                        if not snr_values:
+                            print("Second trace attempt:")
+                            snr_values = await _execute_trace_for_path_async(mc, full_path_flat)
+                        _insert_trace_result(conn, path_id, snr_values)
+                        if not snr_values:
+                            # the prefix path could not be reached, so stop the whole process
+                            return
+                
+                if role != "Chat Node":
+                    return
+                
+                # try to send a message to a chat node with confirmation as the path to the node was traceable
+                
                 assumed_out_path = []
                 full_path = [public_key]
                 if path:
@@ -258,14 +297,14 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event)
             mc = await MeshCore.create_serial(port, 115200)
             
             # forget all repeaters that were not updated in the last 2 days to provide room for companions
-            ten_days_ago_ts = int(time.time() - 2 * 24 * 60 * 60)
+            days_ago_ts = int(time.time() - 2 * 24 * 60 * 60)
             
             # load contacts and cleanup repeaters
-            print(f"[collector] Fetch contacts")
+            print(f"[collector] Fetch contacts and cleanup repeaters")
             contacts = await mc.commands.get_contacts()
             if contacts and contacts.payload:
                 for contact in contacts.payload:
-                    if contacts.payload[contact]["type"]==2 and contacts.payload[contact]["lastmod"]<ten_days_ago_ts:
+                    if contacts.payload[contact]["type"]==2 and contacts.payload[contact]["lastmod"]<days_ago_ts:
                         await mc.commands.remove_contact(contact)
 
             # last_processed_ts = datetime.now().isoformat(" ", "seconds")
