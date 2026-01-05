@@ -402,8 +402,8 @@ def advert_and_path_thread(
                 await asyncio.sleep(0.1)
 
         try:
-            # Open (or create) the database for this thread
-            conn = init_db(db_path)
+            # Open the database for this thread (schema already initialized in main)
+            conn = sqlite3.connect(db_path, check_same_thread=False)
 
             print(f"[collector] Connecting to {port}...")
             mc = await MeshCore.create_serial(port, 115200)
@@ -1199,6 +1199,10 @@ async def main(stop_event: threading.Event):
     home_latitude = args.latitude
     home_longitude = args.longitude
     checkradius_km = args.checkradius_km
+
+    # Ensure database and schema are initialized even in GUI-only mode
+    conn = init_db(db_path)
+    conn.close()
 
     # Thread that collects adverts, evaluates paths and runs traces sequentially
     t_collect_paths = threading.Thread(
