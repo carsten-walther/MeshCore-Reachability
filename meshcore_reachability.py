@@ -24,16 +24,16 @@ import io
 import qrcode
 
 
-# --- DB-Helferfunktionen -------------------------------------------------
+# --- Database helper functions --------------------------------------------
 
 
 def init_db(db_path: str):
-    """Initialisiert das neue Reachability-Datenmodell (nodes, paths, traces)."""
+    """Initialize the reachability database schema (nodes, paths, traces)."""
     init_db_needed = not os.path.exists(db_path)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     if init_db_needed:
         c = conn.cursor()
-        # saves nodes from adverts
+        # stores nodes from adverts
         c.execute(
             """CREATE TABLE IF NOT EXISTS nodes (
             public_key CHAR(64) PRIMARY KEY,
@@ -45,7 +45,7 @@ def init_db(db_path: str):
             lastmod TEXT
         )"""
         )
-        # saves partial and full paths from adverts if a trace was executed
+        # stores partial and full paths from adverts if a trace was executed
         c.execute(
             """CREATE TABLE IF NOT EXISTS paths (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +55,7 @@ def init_db(db_path: str):
             lastmod TEXT
         )"""
         )
-        # saves snr results of trace executions; snr_values is null if trace did not succeed
+        # stores SNR results of trace executions; snr_values is NULL if trace failed
         c.execute(
             """CREATE TABLE IF NOT EXISTS traces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +65,7 @@ def init_db(db_path: str):
             FOREIGN KEY(path_id) REFERENCES paths(id)
         )"""
         )
-        # create view
+        # convenience view for quickly joining paths and traces with node names
         c.execute(
             """CREATE VIEW IF NOT EXISTS pathtraces AS
                 SELECT
@@ -96,13 +96,24 @@ def init_db(db_path: str):
         conn.commit()
     return conn
 
+
 def formatPath(path_elems: list, default=""):
+    """Return a comma-separated representation of a path element list."""
     if not path_elems:
         return default
     return ",".join(path_elems)
 
-def write_node_to_db(conn: sqlite3.Connection, public_key, name, role, latitude, longitude, lastpath):
-    """Schreibt/aktualisiert einen Node-Eintrag in der Tabelle 'nodes'."""
+
+def write_node_to_db(
+    conn: sqlite3.Connection,
+    public_key,
+    name,
+    role,
+    latitude,
+    longitude,
+    lastpath,
+):
+    """Insert or update a node entry in the ``nodes`` table."""
     c = conn.cursor()
     timestamp = datetime.now().isoformat(" ", "seconds")
     c.execute("SELECT public_key FROM nodes WHERE public_key = ?", (public_key,))
@@ -138,21 +149,31 @@ def write_node_to_db(conn: sqlite3.Connection, public_key, name, role, latitude,
     conn.commit()
 
 
-# --- Kombinierter Thread: Adverts sammeln und Pfade verarbeiten ----------
+# --- Combined thread: collect adverts and process paths --------------------
 
 
-def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event, home_latitude: float | None = None, home_longitude: float | None = None, checkradius_km: float | None = None):
-    """Sammelt MeshCore-Adverts und testet die Erreichbarkeit der Quelle über send_msg und ACK"""
+def advert_and_path_thread(
+    port: str,
+    db_path: str,
+    stop_event: threading.Event,
+    home_latitude: float | None = None,
+    home_longitude: float | None = None,
+    checkradius_km: float | None = None,
+):
+    """Collect MeshCore adverts and test reachability of the source via send_msg and ACK."""
 
     async def _run():
         mc: MeshCore | None = None
         subscription = None
-        last_advert_hour = datetime.now().hour  # track last full hour when advert was sent
+        # track the last full hour when we sent our own advert
+        last_advert_hour = datetime.now().hour
 
         def _distance_km(lat1, lon1, lat2, lon2):
+            """Return great-circle distance between two coordinates in kilometers."""
             if None in (lat1, lon1, lat2, lon2):
                 return None
             from math import radians, sin, cos, sqrt, atan2
+
             R = 6371.0
             dlat = radians(lat2 - lat1)
             dlon = radians(lon2 - lon1)
@@ -161,11 +182,13 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event,
             return R * c
 
         async def handle_rf_packet(event):
+            """Handle RX_LOG_DATA events and trigger reachability checks for adverts."""
             nonlocal mc, subscription, last_advert_hour
 
             packet = event.payload
             if isinstance(packet, dict) and "payload" in packet:
                 packet = MeshCoreDecoder.decode(packet["payload"])
+                # debug helpers for manual inspection:
                 # print(f"  Route Type: {get_route_type_name(packet.route_type)}")
                 # print(f"  Payload Type: {get_payload_type_name(packet.payload_type)}")
                 # print(f"  Message Hash: {packet.message_hash}")
@@ -173,7 +196,7 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event,
 
                 if packet.payload_type == PayloadType.Advert and packet.payload.get("decoded"):
 
-                    # detach from further events to focus on path tracing
+                    # Temporarily unsubscribe from further events while processing this advert
                     mc.unsubscribe(subscription)
 
                     advert = packet.payload["decoded"]
@@ -183,28 +206,49 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event,
                     latitude = None
                     longitude = None
                     print("")
-                    print(f"Received Advert from {role} {name}, Pubkey-Prefix: {advert.public_key[:8]} via Path {formatPath(packet.path, "<direct>")}")
+                    print(
+                        f"Received Advert from {role} {name}, Pubkey-Prefix: {advert.public_key[:8]} via Path {formatPath(packet.path, '<direct>')}"
+                    )
                     if advert.app_data.get("location"):
                         location = advert.app_data["location"]
                         latitude = location.get("latitude")
                         longitude = location.get("longitude")
-                        # print(f"  Location: {latitude}, {longitude}")
-                    write_node_to_db(conn, advert.public_key, name, role, latitude, longitude, formatPath(packet.path))
+                    write_node_to_db(
+                        conn,
+                        advert.public_key,
+                        name,
+                        role,
+                        latitude,
+                        longitude,
+                        formatPath(packet.path),
+                    )
 
-                    # radius-beschränkung für weitere Verarbeitung
+                    # Radius limitation for additional processing
                     inside_radius = True
                     dist = None
-                    if checkradius_km is not None and home_latitude is not None and home_longitude is not None:
+                    if (
+                        checkradius_km is not None
+                        and home_latitude is not None
+                        and home_longitude is not None
+                    ):
                         if latitude is not None and longitude is not None:
-                            dist = _distance_km(home_latitude, home_longitude, latitude, longitude)
+                            dist = _distance_km(
+                                home_latitude,
+                                home_longitude,
+                                latitude,
+                                longitude,
+                            )
                             inside_radius = dist is None or dist <= checkradius_km
                         else:
+                            # no location info -> treat as inside to not lose nodes
                             inside_radius = True
 
                     if dist is not None:
-                        print(f"Distance from home: {dist:.2f} km (radius limit: {checkradius_km} km) -> {'inside' if inside_radius else 'outside'}")
+                        print(
+                            f"Distance from home: {dist:.2f} km (radius limit: {checkradius_km} km) -> {'inside' if inside_radius else 'outside'}"
+                        )
 
-                    # send out advert once per full hour so peering chat nodes can respond
+                    # Send out our own advert once per full hour so peering chat nodes can respond
                     current_hour = datetime.now().hour
                     if last_advert_hour is None or current_hour != last_advert_hour:
                         last_advert_hour = current_hour
@@ -212,30 +256,33 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event,
                         print("Sent hourly flood advert so peers can respond upon requests")
                         await asyncio.sleep(3)
 
-                    # process the foreign advert nur falls im Radius (oder ohne Geo-Location)
+                    # Process the foreign advert only if the node is inside the radius (or has no geo-location)
                     if inside_radius:
                         await process_advert(role, advert.public_key, packet.path)
                     else:
                         print("Skipping advert processing for node outside radius constraint")
-                    # now listen to RX log events again
+
+                    # Re-subscribe to RX log events
                     subscription = mc.subscribe(EventType.RX_LOG_DATA, handle_rf_packet)
                 else:
-                    print(".", end='')
-                    
+                    # A non-advert packet; just print a dot so we see ongoing traffic
+                    print(".", end="")
+
         async def process_advert(role, public_key, path):
+            """Analyse the path of an advert, run traces, and test reverse messaging for chat nodes."""
             nonlocal mc
 
             try:
-                
-                # examine the path
-                
+                # Normalise and reverse the given path as seen from our local node
                 path_elems = []
                 if path:
                     path_elems = list(reversed(path))
-                    
+
+                # For non-chat nodes add the advertising node as final hop
                 if role != "Chat Node":
                     path_elems += [public_key]
 
+                # Check all path prefixes and, if needed, run traces for them
                 prefix = []
                 prefix_short = []
                 for elem in path_elems:
@@ -245,10 +292,11 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event,
 
                     needsNewTrace, lastTraceFailed = _needs_new_trace(conn, path_id, now_ts)
                     if not needsNewTrace and lastTraceFailed:
-                        # the prefix path could not be reached last time, so stop the whole process
+                        # The prefix path was unreachable previously, skip processing of longer prefixes
                         return
 
                     if needsNewTrace:
+                        # Prefix "92 c0 a1" becomes a roundtrip-like path: 92,c0,a1,c0,92
                         if len(prefix_short) == 1:
                             full_path = list(prefix_short)
                         else:
@@ -261,124 +309,147 @@ def advert_and_path_thread(port: str, db_path: str, stop_event: threading.Event,
                             snr_values = await _execute_trace_for_path_async(mc, full_path_flat)
                         _insert_trace_result(conn, path_id, snr_values)
                         if not snr_values:
-                            # the prefix path could not be reached, so stop the whole process
+                            # This prefix path could not be reached, do not try longer prefixes
                             return
-                
+
+                # For non-chat nodes we are done after tracing all path prefixes
                 if role != "Chat Node":
                     return
-                
-                # try to send a message to a chat node with confirmation as the path to the node was traceable
-                
+
+                # For chat nodes try to send a message and wait for an ACK once the path is traceable
                 assumed_out_path = []
                 full_path = [public_key]
                 if path:
                     assumed_out_path = list(reversed(path))
                     full_path = assumed_out_path + [public_key]
 
-                # check if path was checked already
+                # Check if we already tested this full path
                 path_id, now_ts = _ensure_path_record(conn, full_path)
-
                 needsNewTrace, lastTraceFailed = _needs_new_trace(conn, path_id, now_ts)
 
                 if not needsNewTrace:
                     return
 
-                # try to contact Chat Node
+                # Try to contact Chat Node
                 contact = mc.get_contact_by_key_prefix(public_key)
                 if contact is None:
-                    # refresh the list
+                    # Refresh contact list and try again
                     await mc.commands.get_contacts()
                     contact = mc.get_contact_by_key_prefix(public_key)
                     if contact is None:
-                        print("Your contact list seems to be filled totally; you need to remove unrequired records to process new Chat Node adverts")
+                        print(
+                            "Your contact list seems to be filled totally; you need to remove unrequired records to process new Chat Node adverts"
+                        )
                         return
 
                 saved_out_path = contact["out_path"]
 
-                # change out path to assumed out path from advert
+                # Temporarily change out path to assumed out path from advert
                 if not assumed_out_path:
                     op_res = await mc.commands.reset_path(contact)
                     if op_res.type == EventType.ERROR:
                         return
                 else:
-                    op_res = await mc.commands.change_contact_path(contact, path="".join(assumed_out_path))
+                    op_res = await mc.commands.change_contact_path(
+                        contact, path="".join(assumed_out_path)
+                    )
                     if op_res.type == EventType.ERROR:
                         return
-                
-                # send back a message and wait for the confirmation
-                send_event = await mc.commands.send_msg(dst=contact, msg="Received your advert, testing reverse connection")
+
+                # Send a message and wait for the confirmation
+                send_event = await mc.commands.send_msg(
+                    dst=contact,
+                    msg="Received your advert, testing reverse connection",
+                )
                 if send_event.type == EventType.ERROR:
                     print(f"Error {send_event}")
                     await mc.commands.change_contact_path(contact, path=saved_out_path)
                     return
-                
+
                 # Wait for ACK
                 exp_ack = send_event.payload["expected_ack"].hex()
                 timeout = 0
                 min_timeout = 8
-                timeout = send_event.payload["suggested_timeout"] / 1000 * 1.2 if timeout==0 else timeout
+                timeout = (
+                    send_event.payload["suggested_timeout"] / 1000 * 1.2
+                    if timeout == 0
+                    else timeout
+                )
                 timeout = timeout if timeout > min_timeout else min_timeout
-                send_resp_event = await mc.wait_for_event(EventType.ACK, attribute_filters={"code": exp_ack}, timeout=timeout)
+                send_resp_event = await mc.wait_for_event(
+                    EventType.ACK,
+                    attribute_filters={"code": exp_ack},
+                    timeout=timeout,
+                )
                 if send_resp_event:
-                    print(f"Reverse message to {contact["adv_name"]} was confirmed (ACK)")
+                    print(f"Reverse message to {contact['adv_name']} was confirmed (ACK)")
                     _insert_trace_result(conn, path_id, "ACK")
                 else:
-                    print(f"Reverse message to {contact["adv_name"]} failed")
-                    # reset path to previous setting
+                    print(f"Reverse message to {contact['adv_name']} failed")
+                    # Reset path to previous setting
                     if not saved_out_path:
                         await mc.commands.reset_path(contact)
                     else:
-                        await mc.commands.change_contact_path(contact, path=saved_out_path)
+                        await mc.commands.change_contact_path(
+                            contact, path=saved_out_path
+                        )
 
             except Exception as e:
                 print(f"[process_advert] Error: {e}")
 
             finally:
-                 await asyncio.sleep(0.1)
+                # Give the event loop some breathing room between adverts
+                await asyncio.sleep(0.1)
 
         try:
-            nonlocal_mc: MeshCore | None  # type: ignore[unused-ignore]
+            # Open (or create) the database for this thread
             conn = init_db(db_path)
 
             print(f"[collector] Connecting to {port}...")
             mc = await MeshCore.create_serial(port, 115200)
-            
-            # forget all repeaters that were not updated in the last 2 days to provide room for companions
+
+            # Forget all repeaters that were not updated in the last 2 days to free space
             days_ago_ts = int(time.time() - 2 * 24 * 60 * 60)
-            
-            # load contacts and cleanup repeaters
+
+            # Load contacts and cleanup stale repeaters
             print(f"[collector] Fetch contacts and cleanup repeaters")
             contacts = await mc.commands.get_contacts()
             if contacts and contacts.payload:
                 for contact in contacts.payload:
-                    if contacts.payload[contact]["type"]==2 and contacts.payload[contact]["lastmod"]<days_ago_ts:
+                    if (
+                        contacts.payload[contact]["type"] == 2
+                        and contacts.payload[contact]["lastmod"] < days_ago_ts
+                    ):
                         await mc.commands.remove_contact(contact)
 
-            # last_processed_ts = datetime.now().isoformat(" ", "seconds")
             print("[collector] Waiting for log data")
-            
+
+            # Subscribe to RX log data events
             subscription = mc.subscribe(EventType.RX_LOG_DATA, handle_rf_packet)
 
+            # Main loop: keep the collector running until the stop event is set
             while not stop_event.is_set():
                 await asyncio.sleep(2)
 
         except Exception as e:
             print(f"[collector] Error: {e}")
-            
+
         finally:
-            mc.disconnect()
+            if mc is not None:
+                mc.disconnect()
             conn.close()
 
     asyncio.run(_run())
 
 
-# --- Thread 2: Auswertung nach 'nodes' geschriebenen Pfaden ----------------
+# --- Helper functions for storing paths and traces ------------------------
+
 
 def _ensure_path_record(conn: sqlite3.Connection, path_elements):
-    """Sucht oder legt einen Pfad in 'paths' an und erhöht count.
+    """Find or insert a path in ``paths`` and bump its usage counter.
 
-    path_elements ist eine Liste von Kürzeln, z.B. ['92'] oder ['92','c0'].
-    Gibt (path_id, now_ts) zurück.
+    ``path_elements`` is a list of node key prefixes, e.g. ``['92']`` or ``['92', 'c0']``.
+    Returns ``(path_id, now_ts)``.
     """
     c = conn.cursor()
     now_ts = datetime.now().isoformat(" ", "seconds")
@@ -401,14 +472,16 @@ def _ensure_path_record(conn: sqlite3.Connection, path_elements):
     conn.commit()
     return pid, now_ts
 
-def _needs_new_trace(conn: sqlite3.Connection, path_id: int, now_ts: str) -> tuple[bool,bool]:
-    """Prüft, ob für path_id ein neuer Trace ausgeführt werden soll.
 
-    1. Return Value:
-    - Wenn kein Trace-Eintrag existiert -> True
-    - Wenn letzter Trace älter als 72 Stunden -> True
-    2. Return Value:
-    - Falls der letzte Trace fehlgeschlagen ist --> True
+def _needs_new_trace(conn: sqlite3.Connection, path_id: int, now_ts: str) -> tuple[bool, bool]:
+    """Return whether a new trace for ``path_id`` is required and whether the last one failed.
+
+    First return value (``needs_new_trace``):
+    * ``True`` if no trace entry exists yet
+    * ``True`` if the last trace is older than 72 hours
+
+    Second return value (``last_trace_failed``):
+    * ``True`` if the last trace failed (``snr_values`` is ``NULL``)
     """
     c = conn.cursor()
     c.execute(
@@ -417,48 +490,57 @@ def _needs_new_trace(conn: sqlite3.Connection, path_id: int, now_ts: str) -> tup
     )
     row = c.fetchone()
     if not row:
-        return True,False
+        return True, False
     last_ts = datetime.fromisoformat(row[0])
     now_dt = datetime.fromisoformat(now_ts)
     delta = now_dt - last_ts
-    return delta.total_seconds() > 3600*72, row[1] is None # > 72 Stunden
+    # do not re-trace paths younger than 72 hours
+    return delta.total_seconds() > 3600 * 72, row[1] is None
 
 
 async def _execute_trace_for_path_async(mc: MeshCore, full_path):
-    """Führt den Trace asynchron aus und gibt JSON-Array der SNR-Werte zurück oder None."""
+    """Execute a trace for the comma-separated path and return SNR values or ``None``.
+
+    Returns a comma-separated string of per-hop SNR values in case of success,
+    otherwise ``None``.
+    """
     await asyncio.sleep(1)
 
     try:
-        import random
-
         tag = random.randint(1, 0xFFFFFFFF)
         result = await mc.commands.send_trace(path=full_path, tag=tag)
 
         if result.type == EventType.ERROR:
-            print(f"Failed to send trace packet with path={full_path}: {result.payload.get('reason', 'unknown error')}")
+            print(
+                f"Failed to send trace packet with path={full_path}: {result.payload.get('reason', 'unknown error')}"
+            )
             return None
         if result.type != EventType.MSG_SENT:
-            print("Failed to send trace packet with path={full_path}")
+            print(f"Failed to send trace packet with path={full_path}")
             return None
 
-        print(f"Sent trace packet with path={full_path} and tag={tag}, waiting for response ...")
-        
+        print(
+            f"Sent trace packet with path={full_path} and tag={tag}, waiting for response ..."
+        )
+
         event = await mc.wait_for_event(
             EventType.TRACE_DATA,
             attribute_filters={"tag": tag},
-            timeout=15
+            timeout=15,
         )
         if not event:
-            print(f"No trace response received with path={full_path} and tag={tag} within timeout")
+            print(
+                f"No trace response received with path={full_path} and tag={tag} within timeout"
+            )
             return None
 
         trace = event.payload
         print(f"Trace data received for path={full_path} and tag={tag}:")
+        # Debug fields if needed:
         # print(f"  Tag: {trace['tag']}")
         # print(f"  Flags: {trace.get('flags', 0)}")
         # print(f"  Path Length: {trace.get('path_len', 0)}")
 
-        # FSTODO
         if not trace.get("path"):
             return None
 
@@ -466,18 +548,20 @@ async def _execute_trace_for_path_async(mc: MeshCore, full_path):
         for node in trace["path"]:
             if "snr" not in node:
                 return None
-            # TODO
             print(f"  {node}")
             snr_list.append(str(node["snr"]))
-        
-        return ','.join(snr_list)
+
+        return ",".join(snr_list)
 
     except Exception as e:
         print(f"Trace exception: {e}")
         return None
 
 
-def _insert_trace_result(conn: sqlite3.Connection, path_id: int, snr_values: str | None):
+def _insert_trace_result(
+    conn: sqlite3.Connection, path_id: int, snr_values: str | None
+):
+    """Insert a new entry into the ``traces`` table for a path trace run."""
     c = conn.cursor()
     now_ts = datetime.now().isoformat(" ", "seconds")
     c.execute(
@@ -487,21 +571,34 @@ def _insert_trace_result(conn: sqlite3.Connection, path_id: int, snr_values: str
     conn.commit()
 
 
-# --- Thread 3: Visualisierung (Dash + Cytoscape) --------------------------
+# --- Thread 3: Visualisation (Dash + Leaflet) -----------------------------
 
 
-def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_latitude: float | None = None, home_longitude: float | None = None, checkradius_km: float | None = None):
+def create_dash_app_from_db(
+    db_path,
+    maptiler_api_key: str | None = None,
+    home_latitude: float | None = None,
+    home_longitude: float | None = None,
+    checkradius_km: float | None = None,
+):
+    """Create and configure the Dash app that visualises the reachability data."""
     mclink_qr_cache: dict[str, str] = {}
-    statistics: dict[str,str] = {"chatnodes_rcvd_adverts":"", "chatnodes_reachable":"",
-                                 "repeaters_rcvd_adverts":"", "repeaters_reachable":"",
-                                 "roomservers_rcvd_adverts":"", "roomservers_reachable":"",
-                                 "checked_paths":""}
+    statistics: dict[str, str] = {
+        "chatnodes_rcvd_adverts": "",
+        "chatnodes_reachable": "",
+        "repeaters_rcvd_adverts": "",
+        "repeaters_reachable": "",
+        "roomservers_rcvd_adverts": "",
+        "roomservers_reachable": "",
+        "checked_paths": "",
+    }
     import dash
     from dash import html, dcc, Output, Input, State
     import dash_leaflet as dl
     import sqlite3
 
     def load_node_meta_from_db():
+        """Load node metadata and basic statistics from the SQLite database."""
         conn = sqlite3.connect(db_path, check_same_thread=False)
         c = conn.cursor()
         c.execute(
@@ -524,7 +621,7 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
         )
         rows = c.fetchall()
 
-        # Statistikwerte aus DB ermitteln
+        # derive statistics from the DB content
         # Chat Nodes
         c.execute("SELECT COUNT(*) FROM nodes WHERE role = 'Chat Node'")
         statistics["chatnodes_rcvd_adverts"] = c.fetchone()[0]
@@ -576,7 +673,7 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
         )
         statistics["roomservers_reachable"] = c.fetchone()[0]
 
-        # Anzahl geprüfter Pfade (inkl. Sub-Pfade) = Einträge in paths
+        # Total number of checked paths (including sub-paths) = number of entries in ``paths``
         c.execute("SELECT COUNT(*) FROM paths")
         statistics["checked_paths"] = c.fetchone()[0]
 
@@ -598,11 +695,12 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
 
     node_meta = load_node_meta_from_db()
 
-
     def node_label(n):
+        """Return a short label for a node based on its public key."""
         return n[:4] if len(n) == 64 else n
 
     def val_ok(val):
+        """Return ``True`` if a stored coordinate value looks usable."""
         return val not in (None, 0, 0.0)
 
     coords = [
@@ -624,9 +722,10 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
     IMG_W, IMG_H = 1000, 800
 
     def map_coords_to_latlon(lon, lat):
+        """Convert stored lon/lat coordinates to Leaflet's [lat, lon] representation."""
         return [lat, lon]
 
-    # Leaflet-Kartenmitte bestimmen
+    # Determine Leaflet map center and zoom
     if coords:
         center_lat = (min_lat + max_lat) / 2
         center_lon = (min_lon + max_lon) / 2
@@ -642,138 +741,174 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
         children=html.Div(
             className="app-root",
             children=[
-            html.H2(
-                "MeshCore Reachability",
-                className="app-title",
-            ),
-            dcc.Checklist(
-                id="reachable-filter",
-                # : bidirectional, checked latest path from adverts
-                options=[{"label": "show reachable nodes only; the checks are limited to nodes inside the given radius", "value": "reachable_only"}],
-                value=[],
-                className="reachable-filter",
-            ),
-            html.Div(
-                className="map-container",
-                children=[
-                    dl.Map(
-                        center=[center_lat, center_lon],
-                        zoom=zoom,
-                        className="leaflet-map",
-                        children=[
-                            dl.TileLayer(
-                                url=(
-                                    f"https://api.maptiler.com/maps/topo-v4/{{z}}/{{x}}/{{y}}.png?key={maptiler_api_key}"
-                                    if maptiler_api_key
-                                    else "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                html.H2(
+                    "MeshCore Reachability",
+                    className="app-title",
+                ),
+                dcc.Checklist(
+                    id="reachable-filter",
+                    # If enabled, only nodes with at least one successful path trace are shown
+                    options=[
+                        {
+                            "label": "show reachable nodes only; the checks are limited to nodes inside the given radius",
+                            "value": "reachable_only",
+                        }
+                    ],
+                    value=[],
+                    className="reachable-filter",
+                ),
+                html.Div(
+                    className="map-container",
+                    children=[
+                        dl.Map(
+                            center=[center_lat, center_lon],
+                            zoom=zoom,
+                            className="leaflet-map",
+                            children=[
+                                dl.TileLayer(
+                                    url=(
+                                        f"https://api.maptiler.com/maps/topo-v4/{{z}}/{{x}}/{{y}}.png?key={maptiler_api_key}"
+                                        if maptiler_api_key
+                                        else "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                                    ),
+                                    attribution=(
+                                        "<a href='https://www.maptiler.com/copyright/' target='_blank'>&copy; MapTiler</a> "
+                                        "<a href='https://www.openstreetmap.org/copyright' target='_blank'>&copy; OpenStreetMap contributors</a>"
+                                        if maptiler_api_key
+                                        else "&copy; OpenStreetMap contributors"
+                                    ),
+                                    tileSize=512 if maptiler_api_key else 256,
+                                    zoomOffset=-1 if maptiler_api_key else 0,
                                 ),
-                                attribution=(
-                                    "<a href='https://www.maptiler.com/copyright/' target='_blank'>&copy; MapTiler</a> "
-                                    "<a href='https://www.openstreetmap.org/copyright' target='_blank'>&copy; OpenStreetMap contributors</a>"
-                                    if maptiler_api_key
-                                    else "&copy; OpenStreetMap contributors"
+                                dl.LayerGroup(id="node-layer"),
+                                dl.LayerGroup(id="radius-layer"),
+                                dl.Marker(
+                                    id="home-location-marker",
+                                    position=map_coords_to_latlon(
+                                        home_longitude, home_latitude
+                                    ),
+                                    icon={
+                                        "iconUrl": dash.get_asset_url("homelocation.svg"),
+                                        "iconSize": "28",
+                                        "shadowUrl": dash.get_asset_url("iconbg.svg"),
+                                        "shadowSize": "32",
+                                    },
                                 ),
-                                tileSize=512 if maptiler_api_key else 256,
-                                zoomOffset=-1 if maptiler_api_key else 0,
-                            ),
-                            dl.LayerGroup(id="node-layer"),
-                            dl.LayerGroup(id="radius-layer"),
-                            dl.Marker(
-                                id="home-location-marker",
-                                position=map_coords_to_latlon(home_longitude, home_latitude),
-                                icon={
-                                    "iconUrl": dash.get_asset_url("homelocation.svg"),
-                                    "iconSize": "28",
-                                    "shadowUrl": dash.get_asset_url("iconbg.svg"),
-                                    "shadowSize": "32",
-                                },
-                            ),
-                        ],
-                    ),
-                ],
-            ),
-            html.Div(
-                id="stats-container",
-                className="stats-container",
-                children=[
-                    html.Table(
-                        className="stats-table",
-                        children=[
-                            html.Thead(
-                                children=html.Tr(
+                            ],
+                        ),
+                    ],
+                ),
+                html.Div(
+                    id="stats-container",
+                    className="stats-container",
+                    children=[
+                        html.Table(
+                            className="stats-table",
+                            children=[
+                                html.Thead(
+                                    children=html.Tr(
+                                        children=[
+                                            html.Th(""),
+                                            html.Th("Adverts received"),
+                                            html.Th(
+                                                "Reachable Nodes inside check radius"
+                                            ),
+                                        ],
+                                    ),
+                                ),
+                                html.Tbody(
                                     children=[
-                                        html.Th(""),
-                                        html.Th("Adverts received"),
-                                        html.Th("Reachable Nodes inside check radius"),
+                                        html.Tr(
+                                            children=[
+                                                html.Td(
+                                                    "Chat Nodes",
+                                                    className="stat-label",
+                                                ),
+                                                html.Td(
+                                                    id="stat-chatnodes-rcvd",
+                                                    className="stat-value-center",
+                                                ),
+                                                html.Td(
+                                                    id="stat-chatnodes-reach",
+                                                    className="stat-value-right",
+                                                ),
+                                            ],
+                                        ),
+                                        html.Tr(
+                                            children=[
+                                                html.Td(
+                                                    "Repeaters",
+                                                    className="stat-label",
+                                                ),
+                                                html.Td(
+                                                    id="stat-repeaters-rcvd",
+                                                    className="stat-value-center",
+                                                ),
+                                                html.Td(
+                                                    id="stat-repeaters-reach",
+                                                    className="stat-value-right",
+                                                ),
+                                            ],
+                                        ),
+                                        html.Tr(
+                                            children=[
+                                                html.Td(
+                                                    "Room Servers",
+                                                    className="stat-label",
+                                                ),
+                                                html.Td(
+                                                    id="stat-roomservers-rcvd",
+                                                    className="stat-value-center",
+                                                ),
+                                                html.Td(
+                                                    id="stat-roomservers-reach",
+                                                    className="stat-value-right",
+                                                ),
+                                            ],
+                                        ),
                                     ],
                                 ),
-                            ),
-                            html.Tbody(
-                                children=[
-                                    html.Tr(
+                            ],
+                        ),
+                        html.P(
+                            id="stat-checked-paths",
+                            className="stat-checked-paths",
+                        ),
+                        html.H3(
+                            "Nodes without geo location:",
+                            className="nodes-without-geo-title",
+                        ),
+                        html.Table(
+                            className="nodes-without-geo-table",
+                            children=[
+                                html.Thead(
+                                    children=html.Tr(
                                         children=[
-                                            html.Td("Chat Nodes", className="stat-label"),
-                                            html.Td(id="stat-chatnodes-rcvd", className="stat-value-center"),
-                                            html.Td(id="stat-chatnodes-reach", className="stat-value-right"),
+                                            html.Th("Name"),
+                                            html.Th("Role"),
+                                            html.Th("Public-Key"),
+                                            html.Th("Contact-QR-Code"),
                                         ],
                                     ),
-                                    html.Tr(
-                                        children=[
-                                            html.Td("Repeaters", className="stat-label"),
-                                            html.Td(id="stat-repeaters-rcvd", className="stat-value-center"),
-                                            html.Td(id="stat-repeaters-reach", className="stat-value-right"),
-                                        ],
-                                    ),
-                                    html.Tr(
-                                        children=[
-                                            html.Td("Room Servers", className="stat-label"),
-                                            html.Td(id="stat-roomservers-rcvd", className="stat-value-center"),
-                                            html.Td(id="stat-roomservers-reach", className="stat-value-right"),
-                                        ],
-                                    ),
-                                ],
-                            ),
-                        ],
-                    ),
-                    html.P(
-                        id="stat-checked-paths",
-                        className="stat-checked-paths",
-                    ),
-                    html.H3(
-                        "Nodes without geo location:",
-                        className="nodes-without-geo-title",
-                    ),
-                    html.Table(
-                        className="nodes-without-geo-table",
-                        children=[
-                            html.Thead(
-                                children=html.Tr(
-                                    children=[
-                                        html.Th("Name"),
-                                        html.Th("Role"),
-                                        html.Th("Public-Key"),
-                                        html.Th("Contact-QR-Code"),
-                                    ],
                                 ),
-                            ),
-                            html.Tbody(id="nodes-without-geo-body"),
-                        ],
-                    ),
-                ],
-            ),
-            html.Div(
-                id="node-details-overlay",
-                className="node-details-overlay",
-            ),
-            dcc.Store(id="node-meta-store", data=node_meta),
-            dcc.Interval(
-                id="db-refresh-interval",
-                interval=2 * 60 * 1000,  # 2 Minuten
-                n_intervals=0,
-            ),
-        ],
+                                html.Tbody(id="nodes-without-geo-body"),
+                            ],
+                        ),
+                    ],
+                ),
+                html.Div(
+                    id="node-details-overlay",
+                    className="node-details-overlay",
+                ),
+                dcc.Store(id="node-meta-store", data=node_meta),
+                dcc.Interval(
+                    id="db-refresh-interval",
+                    interval=2 * 60 * 1000,  # refresh every 2 minutes
+                    n_intervals=0,
+                ),
+            ],
         ),
-        )
+    )
 
     @app.callback(
         Output("node-meta-store", "data"),
@@ -781,10 +916,10 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
         State("node-meta-store", "data"),
     )
     def refresh_node_meta(n_intervals, current_data):
-        # z.B. nur alle 1 Intervalle wirklich laden (alle 2 Minuten)
+        """Periodically reload node metadata from the database."""
         if n_intervals is None:
             return current_data
-        # Hier könnte man zusätzlich throttlen (n_intervals % N), falls gewünscht
+        # Could be further throttled via (n_intervals % N) if required
         return load_node_meta_from_db()
 
     @app.callback(
@@ -800,14 +935,16 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
         Output("nodes-without-geo-body", "children"),
         Input("reachable-filter", "value"),
         State("node-meta-store", "data"),
-        )
+    )
     def update_node_markers(filter_values, node_meta_store):
+        """Update map markers, radius overlay and statistics whenever data changes."""
         show_reachable_only = "reachable_only" in (filter_values or [])
 
         def val_ok(val):
             return val not in (None, 0, 0.0)
 
         def get_role_id(meta):
+            """Return the numeric MeshCore role ID for a node."""
             role_id = 1
             if meta.get("role") == "Repeater":
                 role_id = 2
@@ -816,6 +953,7 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
             return role_id
 
         def get_mclink_qr(meta):
+            """Return (and cache) a data-url QR code for adding this node as contact."""
             role_id = get_role_id(meta)
             mclink = f"meshcore://contact/add?{urlencode({'name': meta.get('name')})}&public_key={meta['public_key']}&type={role_id}"
 
@@ -833,10 +971,10 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
             mclink_qr_cache[mclink] = mclink_qr_data_url
             return mclink_qr_data_url
 
-        # read nodes for markers
+        # Create markers for all nodes with location information
         markers = []
 
-        # radius circle (if provided)
+        # Radius circle (if provided)
         radius_markers = []
         if checkradius_km is not None and val_ok(home_latitude) and val_ok(home_longitude):
             # Leaflet expects radius in meters
@@ -861,12 +999,21 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
                 markers.append(
                     dl.Marker(
                         id=f"node-marker-{meta['public_key']}",
-                        position=map_coords_to_latlon(meta["longitude"], meta["latitude"]),
+                        position=map_coords_to_latlon(
+                            meta["longitude"], meta["latitude"]
+                        ),
                         children=dl.Tooltip(
-                            content=f"<span style='font-weight:bold;color:{'blue' if meta['reachable']==1 else 'red'}'>{meta['role']} {meta['name']}</span><br/>Latest Path: {meta['lastpath'] or '[direct]'}<br/>Public-Key: {meta['public_key'][:10]}...<br/><img src='{mclink_qr_data_url}' alt='MC-Link QR Code'/>"
+                            content=(
+                                f"<span style='font-weight:bold;color:{'blue' if meta['reachable']==1 else 'red'}'>{meta['role']} {meta['name']}</span>"  # noqa: E501
+                                f"<br/>Latest Path: {meta['lastpath'] or '[direct]'}"  # noqa: E501
+                                f"<br/>Public-Key: {meta['public_key'][:10]}..."  # noqa: E501
+                                f"<br/><img src='{mclink_qr_data_url}' alt='MC-Link QR Code'/>"  # noqa: E501
+                            )
                         ),
                         icon={
-                            "iconUrl": dash.get_asset_url(f"{meta['role'].lower().replace(' ', '-')}{'_reachable' if meta['reachable']==1 else ''}.svg"),
+                            "iconUrl": dash.get_asset_url(
+                                f"{meta['role'].lower().replace(' ', '-')}{'_reachable' if meta['reachable']==1 else ''}.svg"
+                            ),
                             "iconSize": "24",
                             "shadowUrl": dash.get_asset_url("iconbg.svg"),
                             "shadowSize": "28",
@@ -874,19 +1021,21 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
                     )
                 )
 
-        # Tabelle "Nodes without geo location" füllen
+        # Table "Nodes without geo location"
         nodes_no_geo = [
             meta
             for meta in node_meta_store.values()
-            if not val_ok(meta.get("longitude")) or not val_ok(meta.get("latitude"))
+            if not val_ok(meta.get("longitude"))
+            or not val_ok(meta.get("latitude"))
         ]
 
         def sort_key(m):
-            # erreichbare zuerst, dann nicht erreichbare
+            """Sort reachable nodes first and then by most recent advert time."""
             reachable_flag = 0 if m.get("reachable") == 1 else 1
-            # lastmod absteigend -> wir geben negativen Timestamp als Sortierschlüssel zurück
             try:
-                dt = datetime.fromisoformat(m.get("lastmod") or "1970-01-01 00:00:00")
+                dt = datetime.fromisoformat(
+                    m.get("lastmod") or "1970-01-01 00:00:00"
+                )
                 ts = dt.timestamp()
             except Exception:
                 ts = 0
@@ -962,34 +1111,87 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_l
             rows_no_geo,
         )
 
-
     return app
 
 
-def dash_server_thread(db_path: str, stop_event: threading.Event, maptiler_api_key: str | None = None, home_latitude: float | None = None, home_longitude: float | None = None, checkradius_km: float | None = None):
-    """Startet die Dash-Anwendung (blockierend in diesem Thread)."""
-    app = create_dash_app_from_db(db_path, maptiler_api_key=maptiler_api_key, home_latitude=home_latitude, home_longitude=home_longitude, checkradius_km=checkradius_km)
-    # Dash selbst hat keine eingebaute Möglichkeit, über ein Event sauber zu stoppen.
-    # Wir starten den Server einfach und verlassen uns auf Prozessende.
+def dash_server_thread(
+    db_path: str,
+    stop_event: threading.Event,
+    maptiler_api_key: str | None = None,
+    home_latitude: float | None = None,
+    home_longitude: float | None = None,
+    checkradius_km: float | None = None,
+):
+    """Start the Dash application (blocking) in this thread."""
+    app = create_dash_app_from_db(
+        db_path,
+        maptiler_api_key=maptiler_api_key,
+        home_latitude=home_latitude,
+        home_longitude=home_longitude,
+        checkradius_km=checkradius_km,
+    )
+    # Dash itself has no built-in way to be shut down via an event.
+    # We simply start the server and rely on process termination.
     print("[dash] Starting Dash server on http://0.0.0.0:5342 ...")
     app.run(host="0.0.0.0", port=5342, debug=False)
-    
 
-# --- main() -------
+
+# --- main() ---------------------------------------------------------------
 
 
 async def main(stop_event: threading.Event):
+    """Parse CLI arguments, start collector thread and (optionally) the Dash UI."""
 
-    # Erwartet, dass Argumente (Port, DB-Pfad) bereits wie gewünscht definiert sind.
     parser = argparse.ArgumentParser(description="MeshCore Reachability Graph")
     parser.add_argument("-p", "--port", required=True, help="LoRa-Device serial port")
-    parser.add_argument("--db", default="mcreach.sqlite", help="SQLite database file")
-    parser.add_argument("-lat", "--latitude", dest="latitude", type=float, required=True, help="Latitude of home location, e.g. 47.73322")
-    parser.add_argument("-lon", "--longitude", dest="longitude", type=float, required=True, help="Longitude of home location, e.g. 12.11043")
-    parser.add_argument("-rad", "--checkradius_km", dest="checkradius_km", type=float, default=200.0, help="limit path checks on nodes within this radius from the home location (in km) to reduce traffic")
-    parser.add_argument("--headless", action="store_true", required=False, help="Run packet collection without web-ui")
-    parser.add_argument("--guionly", action="store_true", required=False, help="Run web-ui without packet collection")
-    parser.add_argument("-ak", "--maptiler_api_key", dest="maptiler_api_key", help="Optional MapTiler API key for background map", required=False)
+    parser.add_argument(
+        "--db", default="mcreach.sqlite", help="SQLite database file"
+    )
+    parser.add_argument(
+        "-lat",
+        "--latitude",
+        dest="latitude",
+        type=float,
+        required=True,
+        help="Latitude of home location, e.g. 47.73322",
+    )
+    parser.add_argument(
+        "-lon",
+        "--longitude",
+        dest="longitude",
+        type=float,
+        required=True,
+        help="Longitude of home location, e.g. 12.11043",
+    )
+    parser.add_argument(
+        "-rad",
+        "--checkradius_km",
+        dest="checkradius_km",
+        type=float,
+        default=200.0,
+        help=(
+            "limit path checks on nodes within this radius from the home location (in km) to reduce traffic"
+        ),
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        required=False,
+        help="Run packet collection without web-ui",
+    )
+    parser.add_argument(
+        "--guionly",
+        action="store_true",
+        required=False,
+        help="Run web-ui without packet collection",
+    )
+    parser.add_argument(
+        "-ak",
+        "--maptiler_api_key",
+        dest="maptiler_api_key",
+        help="Optional MapTiler API key for background map",
+        required=False,
+    )
     args = parser.parse_args()
 
     db_path = args.db
@@ -998,15 +1200,24 @@ async def main(stop_event: threading.Event):
     home_longitude = args.longitude
     checkradius_km = args.checkradius_km
 
-    # Kombinierter Thread: Adverts einsammeln, Pfade auswerten und Traces sequenziell ausführen
+    # Thread that collects adverts, evaluates paths and runs traces sequentially
     t_collect_paths = threading.Thread(
         target=advert_and_path_thread,
-        args=(args.port, db_path, stop_event, home_latitude, home_longitude, checkradius_km),
+        args=(
+            args.port,
+            db_path,
+            stop_event,
+            home_latitude,
+            home_longitude,
+            checkradius_km,
+        ),
         daemon=True,
     )
-    
+
     if args.headless and args.guionly:
-        print("Error in arguments: disable either packet collection (--headless) or gui (--guionly), not both.")
+        print(
+            "Error in arguments: disable either packet collection (--headless) or gui (--guionly), not both."
+        )
         return
 
     if not args.guionly:
@@ -1014,17 +1225,26 @@ async def main(stop_event: threading.Event):
         print("[main] Collector thread started")
 
     if args.headless:
+        # In pure headless mode just keep the main coroutine alive
         while True:
             await asyncio.sleep(2)
     else:
-        dash_server_thread(db_path, stop_event, maptiler_api_key, home_latitude, home_longitude, checkradius_km)
+        dash_server_thread(
+            db_path,
+            stop_event,
+            maptiler_api_key,
+            home_latitude,
+            home_longitude,
+            checkradius_km,
+        )
         print("[main] Launching Dash app")
+
 
 if __name__ == "__main__":
     import asyncio as _asyncio
 
     stop_event = threading.Event()
-    
+
     try:
         print("[main] Started app (Ctrl+C to stop)...")
         _asyncio.run(main(stop_event))
