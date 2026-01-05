@@ -463,7 +463,7 @@ def _insert_trace_result(conn: sqlite3.Connection, path_id: int, snr_values: str
 # --- Thread 3: Visualisierung (Dash + Cytoscape) --------------------------
 
 
-def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
+def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None, home_latitude: float | None = None, home_longitude: float | None = None):
     mclink_qr_cache: dict[str, str] = {}
     statistics: dict[str,str] = {"chatnodes_rcvd_adverts":"", "chatnodes_reachable":"",
                                  "repeaters_rcvd_adverts":"", "repeaters_reachable":"",
@@ -603,11 +603,11 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
     if coords:
         center_lat = (min_lat + max_lat) / 2
         center_lon = (min_lon + max_lon) / 2
-        zoom = 8
+        zoom = 9
     else:
-        center_lat = 49.2125578
-        center_lon = 16.62662018
-        zoom = 8
+        center_lat = home_latitude
+        center_lon = home_longitude
+        zoom = 9
 
     app = dash.Dash(__name__)
     app.layout = dcc.Loading(
@@ -650,6 +650,16 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
                                 zoomOffset=-1 if maptiler_api_key else 0,
                             ),
                             dl.LayerGroup(id="node-layer"),
+                            dl.Marker(
+                                id="home-location-marker",
+                                position=map_coords_to_latlon(home_longitude, home_latitude),
+                                icon={
+                                    "iconUrl": dash.get_asset_url("homelocation.svg"),
+                                    "iconSize": "28",
+                                    "shadowUrl": dash.get_asset_url("iconbg.svg"),
+                                    "shadowSize": "32",
+                                },
+                            ),
                         ],
                     ),
                 ],
@@ -910,9 +920,9 @@ def create_dash_app_from_db(db_path, maptiler_api_key: str | None = None):
     return app
 
 
-def dash_server_thread(db_path: str, stop_event: threading.Event, maptiler_api_key: str | None = None):
+def dash_server_thread(db_path: str, stop_event: threading.Event, maptiler_api_key: str | None = None, home_latitude: float | None = None, home_longitude: float | None = None):
     """Startet die Dash-Anwendung (blockierend in diesem Thread)."""
-    app = create_dash_app_from_db(db_path, maptiler_api_key=maptiler_api_key)
+    app = create_dash_app_from_db(db_path, maptiler_api_key=maptiler_api_key, home_latitude=home_latitude, home_longitude=home_longitude)
     # Dash selbst hat keine eingebaute Möglichkeit, über ein Event sauber zu stoppen.
     # Wir starten den Server einfach und verlassen uns auf Prozessende.
     print("[dash] Starting Dash server on http://0.0.0.0:5342 ...")
@@ -928,6 +938,8 @@ async def main(stop_event: threading.Event):
     parser = argparse.ArgumentParser(description="MeshCore Reachability Graph")
     parser.add_argument("-p", "--port", required=True, help="LoRa-Device serial port")
     parser.add_argument("--db", default="mcreach.sqlite", help="SQLite database file")
+    parser.add_argument("-lat", "--latitude", dest="latitude", type=float, required=True, help="Latitude of home location, e.g. 47.73322")
+    parser.add_argument("-lon", "--longitude", dest="longitude", type=float, required=True, help="Longitude of home location, e.g. 12.11043")
     parser.add_argument("--headless", action="store_true", required=False, help="Run packet collection without web-ui")
     parser.add_argument("--guionly", action="store_true", required=False, help="Run web-ui without packet collection")
     parser.add_argument("-ak", "--maptiler_api_key", dest="maptiler_api_key", help="Optional MapTiler API key for background map", required=False)
@@ -935,6 +947,8 @@ async def main(stop_event: threading.Event):
 
     db_path = args.db
     maptiler_api_key = args.maptiler_api_key
+    home_latitude = args.latitude
+    home_longitude = args.longitude
 
     # Kombinierter Thread: Adverts einsammeln, Pfade auswerten und Traces sequenziell ausführen
     t_collect_paths = threading.Thread(
@@ -955,7 +969,7 @@ async def main(stop_event: threading.Event):
         while True:
             await asyncio.sleep(2)
     else:
-        dash_server_thread(db_path, stop_event, maptiler_api_key)
+        dash_server_thread(db_path, stop_event, maptiler_api_key, home_latitude, home_longitude)
         print("[main] Launching Dash app")
 
 if __name__ == "__main__":
