@@ -36,6 +36,7 @@ Python dependencies (installable via `pip`):
 - `dash`
 - `dash-leaflet`
 - `qrcode`
+- `qrcode[pil]`
 
 You may also need any libraries required by those packages (see their respective documentation).
 
@@ -55,7 +56,7 @@ source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
 
 pip install -r requirements.txt
 # or install needed libraries manually, e.g.:
-# pip install meshcore meshcoredecoder dash dash-leaflet qrcode
+# pip install meshcore meshcoredecoder dash dash-leaflet qrcode qrcode[pil]
 ```
 
 Make sure your user has permission to access the serial port used by the LoRa device (e.g. is in the `dialout` group on Linux).

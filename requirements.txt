@@ -3,3 +3,4 @@ meshcoredecoder
 dash
 dash-leaflet
 qrcode
+qrcode[pil]
