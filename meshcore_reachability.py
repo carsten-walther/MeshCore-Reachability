@@ -955,7 +955,7 @@ def create_dash_app_from_db(
         Output("stat-checked-paths", "children"),
         Output("nodes-without-geo-body", "children"),
         Input("reachable-filter", "value"),
-        State("node-meta-store", "data"),
+        Input("node-meta-store", "data"),
     )
     def update_node_markers(filter_values, node_meta_store):
         """Update map markers, radius overlay and statistics whenever data changes."""
