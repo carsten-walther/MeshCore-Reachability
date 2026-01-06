@@ -792,11 +792,22 @@ def create_dash_app_from_db(
                                 ),
                                 dl.LayerGroup(id="node-layer"),
                                 dl.LayerGroup(id="radius-layer"),
+                                dl.Pane(
+                                    id="home-marker-pane",
+                                    style={"zIndex": 601},  # higher than overlays / default markers
+                                    name="home-marker-pane"
+                                ),
+                                dl.Pane(
+                                    id="other-markers-pane",
+                                    style={"zIndex": 600},
+                                    name="other-markers-pane"
+                                ),
                                 dl.Marker(
                                     id="home-location-marker",
                                     position=map_coords_to_latlon(
                                         home_longitude, home_latitude
                                     ),
+                                    pane="home-marker-pane",
                                     icon={
                                         "iconUrl": dash.get_asset_url("homelocation.svg"),
                                         "iconSize": "28",
@@ -1012,6 +1023,7 @@ def create_dash_app_from_db(
                         position=map_coords_to_latlon(
                             meta["longitude"], meta["latitude"]
                         ),
+                        pane="other-markers-pane",
                         children=dl.Tooltip(
                             content=(
                                 f"<span style='font-weight:bold;color:{'blue' if meta['reachable']==1 else 'red'}'>{meta['role']} {meta['name']}</span>"  # noqa: E501
